@@ -1,0 +1,258 @@
+# Exact File Placement Guide for H:/New Volume (H)/Games/app23
+
+## 📂 Files to Copy and Their Destinations
+
+### Schema File
+SOURCE: /home/claude/assignment_system/assignments_schema.py
+TARGET: H:/New Volume (H)/Games/app23/schemas/assignments_schema.py
+
+### Service File
+SOURCE: /home/claude/assignment_system/services/assignment_service.py
+TARGET: H:/New Volume (H)/Games/app23/services/assignment_service.py
+
+### Main Screen File
+SOURCE: /home/claude/assignment_system/screens/assignments1.py
+TARGET: H:/New Volume (H)/Games/app23/screens/assignments1.py
+
+### Timetable Module Files
+SOURCE: /home/claude/assignment_system/screens/timetable/assignment_list.py
+TARGET: H:/New Volume (H)/Games/app23/screens/timetable/assignment_list.py
+
+SOURCE: /home/claude/assignment_system/screens/timetable/assignment_editor.py
+TARGET: H:/New Volume (H)/Games/app23/screens/timetable/assignment_editor.py
+
+SOURCE: /home/claude/assignment_system/screens/timetable/assignment_marks.py
+TARGET: H:/New Volume (H)/Games/app23/screens/timetable/assignment_marks.py
+
+### Documentation Files (optional but recommended)
+SOURCE: /home/claude/assignment_system/README.md
+TARGET: H:/New Volume (H)/Games/app23/docs/assignments/README.md
+
+SOURCE: /home/claude/assignment_system/INTEGRATION_GUIDE.md
+TARGET: H:/New Volume (H)/Games/app23/docs/assignments/INTEGRATION_GUIDE.md
+
+SOURCE: /home/claude/assignment_system/QUICK_REFERENCE.md
+TARGET: H:/New Volume (H)/Games/app23/docs/assignments/QUICK_REFERENCE.md
+
+## 📋 Post-Copy Checklist
+
+### 1. Verify File Structure
+```
+H:/New Volume (H)/Games/app23/
+├── schemas/
+│   └── assignments_schema.py          ✓ COPIED
+├── services/
+│   └── assignment_service.py          ✓ COPIED
+├── screens/
+│   ├── assignments1.py                ✓ COPIED
+│   └── timetable/
+│       ├── assignment_list.py         ✓ COPIED
+│       ├── assignment_editor.py       ✓ COPIED
+│       └── assignment_marks.py        ✓ COPIED
+└── docs/ (optional)
+    └── assignments/
+        ├── README.md                  ✓ COPIED
+        ├── INTEGRATION_GUIDE.md       ✓ COPIED
+        └── QUICK_REFERENCE.md         ✓ COPIED
+```
+
+### 2. Install Schema
+Open Python console in your project directory:
+```python
+from sqlalchemy import create_engine
+from schemas.assignments_schema import install_assignments_schema
+from connection import get_engine
+
+engine = get_engine()
+install_assignments_schema(engine)
+print("✅ Schema installed successfully!")
+```
+
+### 3. Update Navigation
+Edit: H:/New Volume (H)/Games/app23/app_weekly_planner.py
+
+Add these lines:
+```python
+# At the top with other imports
+from screens import assignments1
+
+# In your pages dictionary
+pages = {
+    # ... existing pages ...
+    "📝 Assignments": assignments1.render_assignments_page,
+}
+```
+
+### 4. Test in Browser
+```bash
+cd "H:/New Volume (H)/Games/app23"
+streamlit run app_weekly_planner.py
+```
+
+Navigate to "📝 Assignments" from the sidebar.
+
+## 🎯 Expected File Sizes
+
+assignments_schema.py         ~35 KB
+assignment_service.py          ~25 KB
+assignments1.py               ~15 KB
+assignment_list.py            ~12 KB
+assignment_editor.py          ~20 KB
+assignment_marks.py           ~14 KB
+
+README.md                     ~25 KB
+INTEGRATION_GUIDE.md          ~15 KB
+QUICK_REFERENCE.md            ~12 KB
+
+TOTAL: ~173 KB
+
+## 🔧 Quick Setup Commands (Windows)
+
+```batch
+REM Navigate to project
+cd "H:\New Volume (H)\Games\app23"
+
+REM Create backup (optional)
+mkdir backup_%date:~-4,4%%date:~-10,2%%date:~-7,2%
+xcopy /E /I . backup_%date:~-4,4%%date:~-10,2%%date:~-7,2%
+
+REM Copy schema
+copy "\\path\to\assignments_schema.py" schemas\
+
+REM Copy service
+copy "\\path\to\assignment_service.py" services\
+
+REM Copy screens
+copy "\\path\to\assignments1.py" screens\
+copy "\\path\to\assignment_list.py" screens\timetable\
+copy "\\path\to\assignment_editor.py" screens\timetable\
+copy "\\path\to\assignment_marks.py" screens\timetable\
+
+REM Create docs folder (if needed)
+mkdir docs\assignments
+copy "\\path\to\README.md" docs\assignments\
+copy "\\path\to\INTEGRATION_GUIDE.md" docs\assignments\
+copy "\\path\to\QUICK_REFERENCE.md" docs\assignments\
+```
+
+## 🚦 Verification Steps
+
+### Step 1: Import Test
+```python
+# Test imports work
+from schemas.assignments_schema import install_assignments_schema
+from services.assignment_service import AssignmentService
+from screens import assignments1
+
+print("✅ All imports successful!")
+```
+
+### Step 2: Schema Test
+```python
+from connection import get_engine
+from sqlalchemy import text as sa_text
+
+engine = get_engine()
+
+# Check if tables exist
+with engine.begin() as conn:
+    result = conn.execute(sa_text("""
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name LIKE 'assignment%'
+    """)).fetchall()
+    
+    print(f"✅ Found {len(result)} assignment tables:")
+    for row in result:
+        print(f"  - {row[0]}")
+```
+
+### Step 3: Service Test
+```python
+from connection import get_engine
+from services.assignment_service import AssignmentService
+
+engine = get_engine()
+service = AssignmentService(engine)
+
+# Try listing (should work even if empty)
+assignments = service.list_assignments()
+print(f"✅ Service working! Found {len(assignments)} assignments")
+```
+
+### Step 4: UI Test
+1. Run: `streamlit run app_weekly_planner.py`
+2. Click "📝 Assignments" in sidebar
+3. Should see: Context selector and subject dropdown
+
+## ❗ Common Issues & Solutions
+
+### Issue 1: Module Not Found
+ERROR: "ModuleNotFoundError: No module named 'schemas.assignments_schema'"
+SOLUTION: Check file is in correct location and __init__.py exists in schemas folder
+
+### Issue 2: Import Error
+ERROR: "ImportError: cannot import name 'install_assignments_schema'"
+SOLUTION: Check assignments_schema.py was copied completely (not truncated)
+
+### Issue 3: Table Already Exists
+ERROR: "Table 'assignments' already exists"
+SOLUTION: This is OK - schema is idempotent. It won't recreate existing tables.
+
+### Issue 4: Foreign Key Constraint
+ERROR: "FOREIGN KEY constraint failed"
+SOLUTION: Ensure parent tables exist (subject_offerings, academic_years, degrees)
+
+### Issue 5: Context Not Available
+WARNING: "Please select context filters first"
+SOLUTION: In main page, select: Degree → Program → Branch → AY → Year → Term
+
+## 📞 Support Checklist
+
+If you encounter issues:
+
+1. ✓ Files copied to correct locations?
+2. ✓ __init__.py files present in all folders?
+3. ✓ Schema installed successfully?
+4. ✓ No import errors?
+5. ✓ Parent tables (subject_offerings, degrees, etc.) exist?
+6. ✓ Context is set in main page?
+7. ✓ Using correct Python environment?
+8. ✓ All dependencies installed (streamlit, pandas, sqlalchemy)?
+
+## 🎉 Success Indicators
+
+You'll know everything is working when:
+
+1. ✅ No import errors when starting app
+2. ✅ "📝 Assignments" appears in sidebar
+3. ✅ Clicking it shows context selector
+4. ✅ Selecting subject shows 6 tabs (List, Editor, Evaluators, Submissions, Marks, Analytics)
+5. ✅ Can create a test assignment in Editor tab
+6. ✅ Test assignment appears in List tab
+7. ✅ Can enter marks in Marks tab
+8. ✅ Scaling calculations display correctly
+
+## 📅 Recommended Timeline
+
+Hour 1: Copy files and install schema
+Hour 2: Test imports and navigation
+Hour 3: Create test data and verify UI
+Hour 4: Integrate with existing data
+
+Total: ~4 hours for basic integration
+
+## 🔗 Next Steps After Setup
+
+1. Create sample assignments
+2. Test full workflow (create → publish → marks → results)
+3. Train users on the system
+4. Integrate with student roster
+5. Connect with faculty table
+6. Set up notifications
+7. Deploy to production
+
+---
+
+Last Updated: November 2024
+Setup Difficulty: Medium
+Estimated Time: 2-4 hours

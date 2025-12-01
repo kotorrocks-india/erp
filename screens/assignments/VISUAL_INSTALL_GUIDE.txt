@@ -1,0 +1,259 @@
+╔════════════════════════════════════════════════════════════════════════╗
+║                   ASSIGNMENT SYSTEM v1.1.0                             ║
+║               VISUAL INSTALLATION GUIDE                                ║
+╚════════════════════════════════════════════════════════════════════════╝
+
+🎯 INSTALLATION IN 3 SIMPLE STEPS
+══════════════════════════════════════════════════════════════════════════
+
+
+STEP 1: COPY SCHEMA FILE
+══════════════════════════════════════════════════════════════════════════
+
+    📦 From Package                     📁 To Your Project
+    
+    schemas/                       →    H:/New Volume (H)/Games/app23/
+      └── assignments_schema.py    →      schemas/
+                                           └── assignments_schema.py ✅
+
+    Command (Windows):
+    ─────────────────────────────────────────────────────────────────
+    copy schemas\assignments_schema.py "H:\New Volume (H)\Games\app23\schemas\"
+
+    Command (Linux/Mac):
+    ─────────────────────────────────────────────────────────────────
+    cp schemas/assignments_schema.py "H:/New Volume (H)/Games/app23/schemas/"
+
+    Result:
+    ─────────────────────────────────────────────────────────────────
+    ✅ Schema file in: schemas/assignments_schema.py
+       (alongside periods_schema.py, timetable_grid_schema.py, etc.)
+
+
+STEP 2: COPY ASSIGNMENTS MODULE
+══════════════════════════════════════════════════════════════════════════
+
+    📦 From Package                     📁 To Your Project
+    
+    screens/                       →    H:/New Volume (H)/Games/app23/
+      └── assignments/             →      screens/
+          ├── assignments_main.py  →        └── assignments/
+          ├── services/            →              ├── assignments_main.py ✅
+          ├── ui/                  →              ├── services/ ✅
+          └── docs/                →              ├── ui/ ✅
+                                                   └── docs/ ✅
+
+    Command (Windows):
+    ─────────────────────────────────────────────────────────────────
+    xcopy /E /I screens\assignments "H:\New Volume (H)\Games\app23\screens\assignments"
+
+    Command (Linux/Mac):
+    ─────────────────────────────────────────────────────────────────
+    cp -r screens/assignments "H:/New Volume (H)/Games/app23/screens/"
+
+    Result:
+    ─────────────────────────────────────────────────────────────────
+    ✅ Module in: screens/assignments/
+       (alongside screens/timetable/)
+
+
+STEP 3: UPDATE NAVIGATION
+══════════════════════════════════════════════════════════════════════════
+
+    📝 Edit: app_weekly_planner.py
+
+    Add this import at the top:
+    ─────────────────────────────────────────────────────────────────
+    from screens.assignments import render_assignments_page
+
+    Add to your pages dictionary:
+    ─────────────────────────────────────────────────────────────────
+    pages = {
+        "🏠 Home": render_home,
+        "📝 Assignments": render_assignments_page,  # ← Add this line
+        "📅 Timetable": render_timetable,
+        # ... your other pages
+    }
+
+    Result:
+    ─────────────────────────────────────────────────────────────────
+    ✅ Navigation updated
+    ✅ "📝 Assignments" appears in sidebar
+
+
+🎉 DONE! Installation Complete!
+══════════════════════════════════════════════════════════════════════════
+
+
+📋 ONE-TIME SCHEMA SETUP (Run Once)
+══════════════════════════════════════════════════════════════════════════
+
+    Open Python console and run:
+    ─────────────────────────────────────────────────────────────────
+    from schemas.assignments_schema import install_assignments_schema
+    from connection import get_engine
+    
+    engine = get_engine()
+    install_assignments_schema(engine)
+
+    This creates:
+    ─────────────────────────────────────────────────────────────────
+    ✅ 15 tables (assignments, assignment_co_mapping, etc.)
+    ✅ 4 views (v_assignment_list, etc.)
+    ✅ All foreign keys and indexes
+    ✅ Audit trail and snapshots
+
+
+✅ VERIFICATION CHECKLIST
+══════════════════════════════════════════════════════════════════════════
+
+After installation, verify these:
+
+    File Locations:
+    ─────────────────────────────────────────────────────────────────
+    [ ] schemas/assignments_schema.py exists
+    [ ] screens/assignments/ folder exists
+    [ ] screens/assignments/services/ folder exists
+    [ ] screens/assignments/ui/ folder exists
+    [ ] screens/assignments/docs/ folder exists
+
+    Imports Work:
+    ─────────────────────────────────────────────────────────────────
+    [ ] Can import: from screens.assignments import render_assignments_page
+    [ ] Can import: from schemas.assignments_schema import install_assignments_schema
+    [ ] Can import: from screens.assignments.services import AssignmentService
+
+    UI Works:
+    ─────────────────────────────────────────────────────────────────
+    [ ] Sidebar shows "📝 Assignments" option
+    [ ] Can navigate to Assignments page
+    [ ] Page loads without errors
+    [ ] Can see "Create New Assignment" button
+
+    Database Works:
+    ─────────────────────────────────────────────────────────────────
+    [ ] Tables created in database
+    [ ] Can view schema in DB browser
+    [ ] Foreign keys properly set up
+
+
+🎯 YOUR PROJECT STRUCTURE (After Installation)
+══════════════════════════════════════════════════════════════════════════
+
+    H:/New Volume (H)/Games/app23/
+    │
+    ├── app_weekly_planner.py           ← Updated with navigation
+    ├── connection.py
+    ├── context.py
+    │
+    ├── schemas/
+    │   ├── periods_schema.py
+    │   ├── timetable_grid_schema.py
+    │   └── assignments_schema.py       ← NEW ✅
+    │
+    └── screens/
+        ├── timetable1.py
+        ├── timetable/
+        │   └── ...
+        │
+        └── assignments/                 ← NEW ✅
+            ├── __init__.py
+            ├── assignments_main.py
+            ├── services/
+            │   ├── assignment_service.py
+            │   └── assignment_co_rubric_connector.py
+            ├── ui/
+            │   ├── assignment_list.py
+            │   ├── assignment_editor.py
+            │   └── assignment_marks.py
+            └── docs/
+                └── ... (11 documentation files)
+
+
+🚀 QUICK TEST
+══════════════════════════════════════════════════════════════════════════
+
+After installation, test the system:
+
+    1. Start your Streamlit app:
+       ─────────────────────────────────────────────────────────────
+       streamlit run app_weekly_planner.py
+
+    2. Select context:
+       ─────────────────────────────────────────────────────────────
+       AY, Degree, Program, Branch, Year, Division, Subject
+
+    3. Navigate to Assignments page:
+       ─────────────────────────────────────────────────────────────
+       Click "📝 Assignments" in sidebar
+
+    4. Click "Create New Assignment":
+       ─────────────────────────────────────────────────────────────
+       Should open 7-tab editor
+
+    5. Check CO mapping:
+       ─────────────────────────────────────────────────────────────
+       Should see COs auto-loaded from subject_cos table
+
+    6. Check Rubrics:
+       ─────────────────────────────────────────────────────────────
+       Should see rubrics auto-loaded from rubric_criteria_catalog
+
+    If all steps work → Installation successful! ✅
+
+
+📚 NEXT STEPS
+══════════════════════════════════════════════════════════════════════════
+
+    1. Read Documentation:
+       ─────────────────────────────────────────────────────────────
+       screens/assignments/docs/START_HERE.txt
+       screens/assignments/docs/INTEGRATION_UPDATE.txt
+
+    2. Create Test Assignment:
+       ─────────────────────────────────────────────────────────────
+       Test with sample subject that has COs and rubrics
+
+    3. Test Marks Entry:
+       ─────────────────────────────────────────────────────────────
+       Enter marks and verify scaling works
+
+    4. Review Analytics:
+       ─────────────────────────────────────────────────────────────
+       Check CO coverage and attainment summaries
+
+    5. Train Users:
+       ─────────────────────────────────────────────────────────────
+       Share documentation with faculty and admins
+
+
+🔧 TROUBLESHOOTING
+══════════════════════════════════════════════════════════════════════════
+
+    Problem: "No module named 'screens.assignments'"
+    Solution: Check that entire screens/assignments/ folder copied,
+              not just individual files.
+    
+    Problem: "No module named 'schemas.assignments_schema'"
+    Solution: Check that assignments_schema.py is in schemas/ folder.
+    
+    Problem: Navigation doesn't show Assignments
+    Solution: Verify import statement and pages dict in app_weekly_planner.py
+    
+    Problem: "Table already exists" error
+    Solution: Normal if running install_assignments_schema() multiple times.
+    
+    Problem: COs not loading
+    Solution: Verify subject_cos table exists and has data for your subjects.
+    
+    Problem: Rubrics not loading
+    Solution: Verify rubric_criteria_catalog table exists and has data.
+
+
+═══════════════════════════════════════════════════════════════════════════
+
+        Installation should take less than 5 minutes! 🎉
+
+        Questions? Check README.txt and INSTALL.txt
+
+═══════════════════════════════════════════════════════════════════════════
