@@ -1,0 +1,560 @@
+# schemas/periods_schema.py
+"""
+Periods/Timegrid Configuration Schema
+- Custom period types (Lecture, Studio, Practical, etc.)
+- Day templates per AY/Term with draft/publish workflow
+- Weekday overrides for different day structures
+- Supports degree/program/branch/year-specific templates
+"""
+
+from __future__ import annotations
+from sqlalchemy import text as sa_text
+from sqlalchemy.engine import Engine
+from core.schema_registry import register
+import logging
+
+log = logging.getLogger(__name__)
+
+def _exec(conn, sql: str):
+    conn.execute(sa_text(sql))
+
+def _has_column(conn, table: str, col: str) -> bool:
+    """Check if column exists"""
+    rows = conn.execute(sa_text(f"PRAGMA table_info({table})")).fetchall()
+    return any(r[1].lower() == col.lower() for r in rows)
+
+
+@register
+def install_periods_schema(engine: Engine):
+    """
+    Install complete periods/timegrid schema.
+    Supports AY-specific templates with version control.
+    """
+    log.info("Installing Periods/Timegrid schema...")
+    
+    with engine.begin() as conn:
+        
+        # ================================================================
+        # 1. PERIOD KINDS (Reusable Period Types)
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS period_kinds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Identification
+            code TEXT NOT NULL UNIQUE,           -- e.g., 'LECTURE_40', 'STUDIO_180'
+            label TEXT NOT NULL,                 -- e.g., 'Lecture - 40 min'
+            
+            -- Classification
+            role TEXT NOT NULL CHECK (role IN (
+                'teaching', 'break', 'lunch', 'assembly', 'buffer', 'other'
+            )),
+            
+            -- Duration
+            default_duration_min INTEGER NOT NULL,
+            
+            -- Visual
+            color_hex TEXT DEFAULT '#2196F3',    -- For UI visualization
+            icon TEXT,                            -- Optional icon/emoji
+            
+            -- Behavior
+            is_blockable INTEGER DEFAULT 0,      -- Can span multiple grid slots
+            is_extendable INTEGER DEFAULT 0,     -- Can be extended beyond default
+            
+            -- Status
+            active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 100,
+            
+            -- Metadata
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT
+        )
+        """)
+        
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_period_kinds_active ON period_kinds(active)")
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_period_kinds_role ON period_kinds(role)")
+        
+        # ================================================================
+        # 2. DAY TEMPLATES (Main Template Metadata)
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS day_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Identification
+            template_code TEXT NOT NULL,         -- e.g., 'BARCH_Y4_STANDARD'
+            template_name TEXT NOT NULL,         -- e.g., 'B.Arch Year 4 Standard Day'
+            
+            -- Temporal Scope (AY-specific)
+            ay_label TEXT NOT NULL,
+            term INTEGER NOT NULL CHECK (term BETWEEN 1 AND 4),
+            
+            -- Organizational Scope (Hierarchy)
+            degree_code TEXT NOT NULL,
+            program_code TEXT,                   -- NULL = applies to all programs
+            branch_code TEXT,                    -- NULL = applies to all branches
+            year INTEGER CHECK (year BETWEEN 1 AND 10),  -- NULL = applies to all years
+            
+            -- Status & Workflow
+            status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN (
+                'draft', 'published', 'archived', 'deleted'
+            )),
+            
+            -- Configuration
+            count_mode TEXT DEFAULT 'teaching_only' CHECK (count_mode IN (
+                'teaching_only', 'all_slots'
+            )),
+            
+            is_default_for_scope INTEGER DEFAULT 0,  -- One default per scope
+            
+            -- Versioning & Copy Tracking
+            version_number INTEGER DEFAULT 1,
+            copied_from_template_id INTEGER,         -- For AY rollover tracking
+            copy_source_ay TEXT,                     -- Original AY if copied
+            
+            -- Computed Summary (denormalized for performance)
+            total_slots INTEGER DEFAULT 0,
+            total_teaching_slots INTEGER DEFAULT 0,
+            total_minutes_all_slots INTEGER DEFAULT 0,
+            total_teaching_minutes INTEGER DEFAULT 0,
+            
+            -- Audit
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            
+            published_by TEXT,
+            published_at DATETIME,
+            
+            archived_by TEXT,
+            archived_at DATETIME,
+            archived_reason TEXT,
+            
+            -- Constraints
+            UNIQUE(ay_label, term, degree_code, program_code, branch_code, year, template_code),
+            FOREIGN KEY (copied_from_template_id) REFERENCES day_templates(id) ON DELETE SET NULL
+        )
+        """)
+        
+        _exec(conn, """
+            CREATE INDEX IF NOT EXISTS idx_day_templates_context 
+            ON day_templates(ay_label, term, degree_code, program_code, branch_code, year)
+        """)
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_day_templates_status ON day_templates(status)")
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_day_templates_default ON day_templates(is_default_for_scope)")
+        
+        # ================================================================
+        # 3. DAY TEMPLATE SLOTS (Default Day Structure)
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS day_template_slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Parent template
+            template_id INTEGER NOT NULL,
+            
+            -- Position
+            slot_index INTEGER NOT NULL,         -- 1, 2, 3, ... (display order)
+            slot_code TEXT NOT NULL,             -- 'P1', 'BREAK1', 'LUNCH', etc.
+            slot_label TEXT NOT NULL,            -- 'Period 1', 'Short Break', etc.
+            
+            -- Period Type
+            period_kind_code TEXT NOT NULL,      -- FK to period_kinds
+            
+            -- Duration (can override default from period_kind)
+            duration_min INTEGER NOT NULL,
+            
+            -- Fixed Times (HH:MM format)
+            fixed_start_time TEXT,               -- e.g., '08:30'
+            fixed_end_time TEXT,                 -- e.g., '09:10'
+            
+            -- Classification (denormalized for queries)
+            is_teaching_slot INTEGER DEFAULT 0,
+            role TEXT,                            -- Copied from period_kind
+            
+            -- Block Info (for studio/long periods)
+            is_block_start INTEGER DEFAULT 0,
+            is_block_part INTEGER DEFAULT 0,
+            block_group_id TEXT,                  -- Groups slots in same block
+            
+            -- Metadata
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            
+            FOREIGN KEY (template_id) REFERENCES day_templates(id) ON DELETE CASCADE,
+            FOREIGN KEY (period_kind_code) REFERENCES period_kinds(code) ON DELETE RESTRICT,
+            UNIQUE(template_id, slot_index),
+            UNIQUE(template_id, slot_code)
+        )
+        """)
+        
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_template_slots_template ON day_template_slots(template_id)")
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_template_slots_kind ON day_template_slots(period_kind_code)")
+        
+        # ================================================================
+        # 4. WEEKDAY OVERRIDES (Different structure for specific days)
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS day_template_weekday_overrides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Parent template
+            template_id INTEGER NOT NULL,
+            
+            -- Which day
+            weekday TEXT NOT NULL CHECK (weekday IN (
+                'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'
+            )),
+            
+            -- Computed Summary
+            total_slots INTEGER DEFAULT 0,
+            total_teaching_slots INTEGER DEFAULT 0,
+            total_minutes_all_slots INTEGER DEFAULT 0,
+            total_teaching_minutes INTEGER DEFAULT 0,
+            
+            -- Metadata
+            override_reason TEXT,                -- e.g., 'Saturday short day'
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT,
+            
+            FOREIGN KEY (template_id) REFERENCES day_templates(id) ON DELETE CASCADE,
+            UNIQUE(template_id, weekday)
+        )
+        """)
+        
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_weekday_overrides_template ON day_template_weekday_overrides(template_id)")
+        
+        # ================================================================
+        # 5. WEEKDAY OVERRIDE SLOTS (Periods for override days)
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS day_template_override_slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Parent override
+            override_id INTEGER NOT NULL,
+            
+            -- Position (same structure as day_template_slots)
+            slot_index INTEGER NOT NULL,
+            slot_code TEXT NOT NULL,
+            slot_label TEXT NOT NULL,
+            
+            period_kind_code TEXT NOT NULL,
+            duration_min INTEGER NOT NULL,
+            
+            fixed_start_time TEXT,
+            fixed_end_time TEXT,
+            
+            is_teaching_slot INTEGER DEFAULT 0,
+            role TEXT,
+            
+            is_block_start INTEGER DEFAULT 0,
+            is_block_part INTEGER DEFAULT 0,
+            block_group_id TEXT,
+            
+            notes TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            
+            FOREIGN KEY (override_id) REFERENCES day_template_weekday_overrides(id) ON DELETE CASCADE,
+            FOREIGN KEY (period_kind_code) REFERENCES period_kinds(code) ON DELETE RESTRICT,
+            UNIQUE(override_id, slot_index),
+            UNIQUE(override_id, slot_code)
+        )
+        """)
+        
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_override_slots_override ON day_template_override_slots(override_id)")
+        
+        # ================================================================
+        # 6. AUDIT TRAIL
+        # ================================================================
+        _exec(conn, """
+        CREATE TABLE IF NOT EXISTS day_template_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            
+            -- Template reference
+            template_id INTEGER NOT NULL,
+            template_code TEXT,
+            
+            -- Action
+            action TEXT NOT NULL CHECK (action IN (
+                'create', 'update', 'delete',
+                'publish', 'unpublish', 'archive', 'restore',
+                'copy_from_ay', 'copy_to_division',
+                'add_slot', 'remove_slot', 'reorder_slots',
+                'add_override', 'remove_override'
+            )),
+            
+            -- Details
+            note TEXT,
+            changed_fields TEXT,                 -- JSON blob
+            
+            -- Actor
+            actor TEXT NOT NULL,
+            actor_role TEXT,
+            
+            -- Timing
+            occurred_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            
+            -- Source tracking
+            source TEXT DEFAULT 'ui',
+            correlation_id TEXT,
+            
+            FOREIGN KEY (template_id) REFERENCES day_templates(id) ON DELETE CASCADE
+        )
+        """)
+        
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_template_audit_template ON day_template_audit(template_id)")
+        _exec(conn, "CREATE INDEX IF NOT EXISTS idx_template_audit_action ON day_template_audit(action, occurred_at DESC)")
+        
+        # ================================================================
+        # 7. VIEWS FOR CONVENIENCE
+        # ================================================================
+        
+        # View: Full template with summary
+        _exec(conn, "DROP VIEW IF EXISTS v_day_templates_full")
+        _exec(conn, """
+        CREATE VIEW v_day_templates_full AS
+        SELECT 
+            t.*,
+            COUNT(DISTINCT s.id) as slot_count,
+            COUNT(DISTINCT CASE WHEN s.is_teaching_slot = 1 THEN s.id END) as teaching_slot_count,
+            COUNT(DISTINCT o.id) as override_count,
+            CASE 
+                WHEN t.status = 'published' THEN '✅ Published'
+                WHEN t.status = 'draft' THEN '📝 Draft'
+                WHEN t.status = 'archived' THEN '📦 Archived'
+                ELSE t.status
+            END as status_display
+        FROM day_templates t
+        LEFT JOIN day_template_slots s ON s.template_id = t.id
+        LEFT JOIN day_template_weekday_overrides o ON o.template_id = t.id
+        GROUP BY t.id
+        """)
+        
+        # View: Active period kinds
+        _exec(conn, "DROP VIEW IF EXISTS v_period_kinds_active")
+        _exec(conn, """
+        CREATE VIEW v_period_kinds_active AS
+        SELECT * FROM period_kinds
+        WHERE active = 1
+        ORDER BY role, sort_order, label
+        """)
+        
+        # ================================================================
+        # 8. TRIGGERS FOR AUTO-COMPUTATION
+        # ================================================================
+        
+        # Auto-update template summary on slot changes
+        _exec(conn, """
+        CREATE TRIGGER IF NOT EXISTS trg_recompute_template_summary_insert
+        AFTER INSERT ON day_template_slots
+        BEGIN
+            UPDATE day_templates
+            SET 
+                total_slots = (
+                    SELECT COUNT(*) FROM day_template_slots WHERE template_id = NEW.template_id
+                ),
+                total_teaching_slots = (
+                    SELECT COUNT(*) FROM day_template_slots 
+                    WHERE template_id = NEW.template_id AND is_teaching_slot = 1
+                ),
+                total_minutes_all_slots = (
+                    SELECT SUM(duration_min) FROM day_template_slots WHERE template_id = NEW.template_id
+                ),
+                total_teaching_minutes = (
+                    SELECT SUM(duration_min) FROM day_template_slots 
+                    WHERE template_id = NEW.template_id AND is_teaching_slot = 1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = NEW.template_id;
+        END;
+        """)
+        
+        _exec(conn, """
+        CREATE TRIGGER IF NOT EXISTS trg_recompute_template_summary_update
+        AFTER UPDATE ON day_template_slots
+        BEGIN
+            UPDATE day_templates
+            SET 
+                total_slots = (
+                    SELECT COUNT(*) FROM day_template_slots WHERE template_id = NEW.template_id
+                ),
+                total_teaching_slots = (
+                    SELECT COUNT(*) FROM day_template_slots 
+                    WHERE template_id = NEW.template_id AND is_teaching_slot = 1
+                ),
+                total_minutes_all_slots = (
+                    SELECT SUM(duration_min) FROM day_template_slots WHERE template_id = NEW.template_id
+                ),
+                total_teaching_minutes = (
+                    SELECT SUM(duration_min) FROM day_template_slots 
+                    WHERE template_id = NEW.template_id AND is_teaching_slot = 1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = NEW.template_id;
+        END;
+        """)
+        
+        _exec(conn, """
+        CREATE TRIGGER IF NOT EXISTS trg_recompute_template_summary_delete
+        AFTER DELETE ON day_template_slots
+        BEGIN
+            UPDATE day_templates
+            SET 
+                total_slots = (
+                    SELECT COUNT(*) FROM day_template_slots WHERE template_id = OLD.template_id
+                ),
+                total_teaching_slots = (
+                    SELECT COUNT(*) FROM day_template_slots 
+                    WHERE template_id = OLD.template_id AND is_teaching_slot = 1
+                ),
+                total_minutes_all_slots = (
+                    SELECT COALESCE(SUM(duration_min), 0) FROM day_template_slots WHERE template_id = OLD.template_id
+                ),
+                total_teaching_minutes = (
+                    SELECT COALESCE(SUM(duration_min), 0) FROM day_template_slots 
+                    WHERE template_id = OLD.template_id AND is_teaching_slot = 1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = OLD.template_id;
+        END;
+        """)
+        
+        # Auto-update override summary
+        _exec(conn, """
+        CREATE TRIGGER IF NOT EXISTS trg_recompute_override_summary
+        AFTER INSERT ON day_template_override_slots
+        BEGIN
+            UPDATE day_template_weekday_overrides
+            SET 
+                total_slots = (
+                    SELECT COUNT(*) FROM day_template_override_slots WHERE override_id = NEW.override_id
+                ),
+                total_teaching_slots = (
+                    SELECT COUNT(*) FROM day_template_override_slots 
+                    WHERE override_id = NEW.override_id AND is_teaching_slot = 1
+                ),
+                total_minutes_all_slots = (
+                    SELECT SUM(duration_min) FROM day_template_override_slots WHERE override_id = NEW.override_id
+                ),
+                total_teaching_minutes = (
+                    SELECT SUM(duration_min) FROM day_template_override_slots 
+                    WHERE override_id = NEW.override_id AND is_teaching_slot = 1
+                )
+            WHERE id = NEW.override_id;
+        END;
+        """)
+        
+        # ================================================================
+        # 9. SEED DATA: Default Period Kinds
+        # ================================================================
+        
+        # Check if period_kinds is empty
+        count = conn.execute(sa_text("SELECT COUNT(*) FROM period_kinds")).fetchone()[0]
+        
+        if count == 0:
+            log.info("Seeding default period kinds...")
+            
+            default_kinds = [
+                ('LECTURE_40', 'Lecture - 40 min', 'teaching', 40, '#2196F3', '📚', 0),
+                ('LECTURE_60', 'Lecture - 60 min', 'teaching', 60, '#1976D2', '📚', 0),
+                ('STUDIO_180', 'Studio - 3 hours', 'teaching', 180, '#9C27B0', '🎨', 1),
+                ('STUDIO_240', 'Studio - 4 hours', 'teaching', 240, '#7B1FA2', '🎨', 1),
+                ('PRACTICAL_90', 'Practical - 90 min', 'teaching', 90, '#FF9800', '🔬', 0),
+                ('PRACTICAL_120', 'Practical - 2 hours', 'teaching', 120, '#F57C00', '🔬', 0),
+                ('THEORY_50', 'Theory - 50 min', 'teaching', 50, '#4CAF50', '📖', 0),
+                ('BREAK_15', 'Short Break - 15 min', 'break', 15, '#FFC107', '☕', 0),
+                ('BREAK_20', 'Long Break - 20 min', 'break', 20, '#FFB300', '☕', 0),
+                ('LUNCH_30', 'Lunch - 30 min', 'lunch', 30, '#FF5722', '🍽️', 0),
+                ('LUNCH_45', 'Lunch - 45 min', 'lunch', 45, '#F4511E', '🍽️', 0),
+                ('ASSEMBLY_20', 'Assembly - 20 min', 'assembly', 20, '#607D8B', '🎤', 0),
+                ('GENERAL_30', 'General - 30 min', 'other', 30, '#9E9E9E', '⚙️', 0),
+                ('GENERAL_45', 'General - 45 min', 'other', 45, '#757575', '⚙️', 0),
+            ]
+            
+            for code, label, role, duration, color, icon, blockable in default_kinds:
+                conn.execute(sa_text("""
+                    INSERT INTO period_kinds 
+                    (code, label, role, default_duration_min, color_hex, icon, is_blockable, created_by)
+                    VALUES (:code, :label, :role, :duration, :color, :icon, :blockable, 'system')
+                """), {
+                    'code': code, 'label': label, 'role': role, 
+                    'duration': duration, 'color': color, 'icon': icon, 'blockable': blockable
+                })
+            
+            log.info(f"✅ Seeded {len(default_kinds)} default period kinds")
+    
+    log.info("✅ Periods/Timegrid schema installed successfully")
+
+
+# ================================================================
+# UTILITY FUNCTIONS
+# ================================================================
+
+def get_template_for_context(engine: Engine, ay_label: str, term: int, 
+                             degree_code: str, program_code: str = None,
+                             branch_code: str = None, year: int = None) -> dict:
+    """
+    Get the most specific template for a given context.
+    Searches in order: year-specific → branch-specific → program-specific → degree-wide
+    """
+    with engine.connect() as conn:
+        query = sa_text("""
+        SELECT * FROM day_templates
+        WHERE ay_label = :ay
+          AND term = :term
+          AND degree_code = :degree
+          AND (:prog IS NULL OR program_code = :prog OR program_code IS NULL)
+          AND (:branch IS NULL OR branch_code = :branch OR branch_code IS NULL)
+          AND (:yr IS NULL OR year = :yr OR year IS NULL)
+          AND status = 'published'
+        ORDER BY 
+            CASE WHEN year = :yr THEN 1 ELSE 2 END,
+            CASE WHEN branch_code = :branch THEN 1 ELSE 2 END,
+            CASE WHEN program_code = :prog THEN 1 ELSE 2 END,
+            is_default_for_scope DESC
+        LIMIT 1
+        """)
+        
+        result = conn.execute(query, {
+            'ay': ay_label, 'term': term, 'degree': degree_code,
+            'prog': program_code, 'branch': branch_code, 'yr': year
+        }).fetchone()
+        
+        return dict(result._mapping) if result else None
+
+
+if __name__ == "__main__":
+    # Test installation
+    from sqlalchemy import create_engine
+    
+    print("\n" + "="*60)
+    print("TESTING PERIODS SCHEMA INSTALLATION")
+    print("="*60 + "\n")
+    
+    engine = create_engine("sqlite:///test_periods.db")
+    install_periods_schema(engine)
+    
+    # Verify tables
+    with engine.connect() as conn:
+        tables = conn.execute(sa_text("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name LIKE '%period%' OR name LIKE '%day_template%'
+            ORDER BY name
+        """)).fetchall()
+        
+        print("\n📋 Tables created:")
+        for table in tables:
+            print(f"  ✅ {table[0]}")
+        
+        # Check seeded period kinds
+        kinds = conn.execute(sa_text("SELECT code, label FROM period_kinds")).fetchall()
+        print(f"\n🎨 Seeded {len(kinds)} period kinds:")
+        for code, label in kinds[:5]:
+            print(f"  - {code}: {label}")
+        print(f"  ... and {len(kinds) - 5} more")
+    
+    print("\n" + "="*60 + "\n")
