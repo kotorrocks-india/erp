@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import List, Tuple, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 import pandas as pd
+import numpy as np
 import streamlit as st
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine, Connection
@@ -70,6 +71,74 @@ except ImportError:
 
 
 log = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# NaN/NULL SAFE CONVERSION HELPERS
+# ------------------------------------------------------------------
+
+def _safe_str(value, default: str = '') -> str:
+    """
+    Safely convert a value to string, handling NaN/None/float properly.
+    
+    - None, np.nan, pd.NA → returns default (empty string)
+    - float values → strips trailing .0 if whole number
+    - Everything else → str(value).strip()
+    - Literal 'nan' strings → returns default
+    """
+    if value is None:
+        return default
+    if pd.isna(value):  # Catches np.nan, pd.NA, pd.NaT, None
+        return default
+    if isinstance(value, float):
+        # NaN check (NaN != NaN)
+        if value != value:
+            return default
+        # Handle float-to-int conversion for whole numbers
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    result = str(value).strip()
+    # Final check for literal 'nan' strings (from prior conversions)
+    if result.lower() == 'nan':
+        return default
+    return result
+
+
+def _safe_int(value, default: int = None) -> Optional[int]:
+    """
+    Safely convert a value to integer, handling NaN/None/float.
+    
+    - None, np.nan, pd.NA → returns default
+    - float 2.0 → 2
+    - float 2.5 → raises ValueError (not a whole number)
+    - string "2" → 2
+    - string "nan" → returns default
+    """
+    if value is None:
+        return default
+    if pd.isna(value):
+        return default
+    if isinstance(value, float):
+        # NaN check
+        if value != value:
+            return default
+        if not value.is_integer():
+            raise ValueError(f"Cannot convert non-whole float {value} to int")
+        return int(value)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    # String case
+    s = str(value).strip()
+    if s.lower() == 'nan' or s == '':
+        return default
+    # Handle "2.0" string format
+    if '.' in s:
+        f = float(s)
+        if not f.is_integer():
+            raise ValueError(f"Cannot convert non-whole number '{s}' to int")
+        return int(f)
+    return int(s)
 
 
 # ------------------------------------------------------------------
@@ -612,7 +681,10 @@ def _pre_check_student_enrollments(df: pd.DataFrame, engine: Engine, degree_code
 
     for col in ['degree_code', 'batch', 'current_year']:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().replace('nan', '')
+            # Replace actual NaN with empty string BEFORE converting to str
+            df[col] = df[col].fillna('').astype(str).str.strip()
+            # Also handle any literal 'nan' strings (case-insensitive)
+            df[col] = df[col].replace(to_replace=r'(?i)^nan$', value='', regex=True)
 
     df_filtered = df[df['degree_code'].str.lower() == degree_code_clean.lower()].copy()
     ignored_rows = len(df) - len(df_filtered)
@@ -792,17 +864,17 @@ def _import_students_with_validation(
         for idx, row in df.iterrows():
             row_num = idx + 2
             try:
-                # 1. Validate Profile Data
-                email = str(row.get('email', '')).strip().lower()
-                student_id = str(row.get('student_id', '')).strip()
-                name = str(row.get('name', '')).strip()
+                # 1. Validate Profile Data (with safe NaN handling)
+                email = _safe_str(row.get('email'), '').lower()
+                student_id = _safe_str(row.get('student_id'), '')
+                name = _safe_str(row.get('name'), '')
 
                 if not name or not email or not student_id:
                     errors.append({'row': row_num, 'email': email, 'error': "Missing required fields: name, email, student_id"})
                     continue
 
                 # 1.5 Process Enrollment Data First (needed for validation)
-                degree_code = str(row.get('degree_code', '')).strip()
+                degree_code = _safe_str(row.get('degree_code'), '')
                 if not degree_code:
                     errors.append({'row': row_num, 'email': email, 'error': "Missing degree_code"})
                     continue
@@ -811,15 +883,18 @@ def _import_students_with_validation(
                     errors.append({'row': row_num, 'email': email, 'error': f"Degree '{degree_code}' not found"})
                     continue
                 
-                batch = str(row.get('batch', '')).strip()
-                current_year = str(row.get('current_year', '')).strip()
+                batch = _safe_str(row.get('batch'), '')
+                current_year = _safe_str(row.get('current_year'), '')
                 
                 if not batch or not current_year:
                     errors.append({'row': row_num, 'email': email, 'error': "Missing batch or year"})
                     continue
                 
                 try:
-                    year_int = int(current_year)
+                    year_int = _safe_int(current_year)
+                    if year_int is None:
+                        errors.append({'row': row_num, 'email': email, 'error': f"Missing or empty year value"})
+                        continue
                     valid_years = _get_valid_years_for_degree(conn, degree_code)
                     if valid_years and year_int not in valid_years:
                         errors.append({
@@ -828,8 +903,8 @@ def _import_students_with_validation(
                             'error': f"Year {year_int} is outside degree duration (valid: {valid_years})"
                         })
                         continue
-                except ValueError:
-                    errors.append({'row': row_num, 'email': email, 'error': f"Invalid year value: {current_year}"})
+                except ValueError as ve:
+                    errors.append({'row': row_num, 'email': email, 'error': f"Invalid year value '{current_year}': {ve}"})
                     continue
                 
                 mapped_batch = translation_map.get('batch', {}).get(batch, batch)
@@ -850,7 +925,7 @@ def _import_students_with_validation(
                     continue
 
                 # **NEW: ROLL NUMBER GENERATION/VALIDATION**
-                provided_roll = str(row.get('roll_number', '')).strip() or None
+                provided_roll = _safe_str(row.get('roll_number'), '') or None
                 
                 if provided_roll:
                     # Validate provided roll number
@@ -886,21 +961,33 @@ def _import_students_with_validation(
 
                 if profile_id:
                     profile_id = profile_id[0]
+                    # Safe extraction of optional fields
+                    phone_val = row.get('phone')
+                    phone = None if pd.isna(phone_val) else _safe_str(phone_val, None)
+                    status_val = row.get('status')
+                    status = 'Good' if pd.isna(status_val) or _safe_str(status_val, '') == '' else _safe_str(status_val)
+                    
                     conn.execute(sa_text("""
                         UPDATE student_profiles
                         SET name = :name, email = :email, phone = :phone, status = :status, updated_at = CURRENT_TIMESTAMP
                         WHERE id = :id
                     """), {
-                        "name": name, "email": email, "phone": row.get('phone'),
-                        "status": row.get('status', 'Good'), "id": profile_id
+                        "name": name, "email": email, "phone": phone,
+                        "status": status, "id": profile_id
                     })
                 else:
+                    # Safe extraction of optional fields for new profile
+                    phone_val = row.get('phone')
+                    phone = None if pd.isna(phone_val) else _safe_str(phone_val, None)
+                    status_val = row.get('status')
+                    status = 'Good' if pd.isna(status_val) or _safe_str(status_val, '') == '' else _safe_str(status_val)
+                    
                     res = conn.execute(sa_text("""
                         INSERT INTO student_profiles (name, email, student_id, phone, status)
                         VALUES (:name, :email, :sid, :phone, :status)
                     """), {
                         "name": name, "email": email, "sid": student_id,
-                        "phone": row.get('phone'), "status": row.get('status', 'Good')
+                        "phone": phone, "status": status
                     })
                     profile_id = res.lastrowid
 
@@ -920,11 +1007,11 @@ def _import_students_with_validation(
                         errors.append({'row': row_num, 'email': email, 'error': f"Batch '{mapped_batch}' does not exist. Create it first."})
                         continue
                 
-                program_code = str(row.get('program_code', '')).strip() or None
-                branch_code = str(row.get('branch_code', '')).strip() or None
+                program_code = _safe_str(row.get('program_code'), '') or None
+                branch_code = _safe_str(row.get('branch_code'), '') or None
                 
                 # Handle division_code from CSV
-                division_code = str(row.get('division_code', '')).strip() or None
+                division_code = _safe_str(row.get('division_code'), '') or None
                 
                 # Validate division exists if provided
                 if division_code:
@@ -985,7 +1072,7 @@ def _import_students_with_validation(
                         "div": division_code,
                         "roll": roll_number,
                         "year": mapped_year, 
-                        "status": row.get('enrollment_status', 'active'),
+                        "status": 'active' if pd.isna(row.get('enrollment_status')) else _safe_str(row.get('enrollment_status'), 'active'),
                         "id": enrollment_id[0]
                     })
                 else:
@@ -1022,7 +1109,7 @@ def _import_students_with_validation(
                         "roll": roll_number,
                         "batch": mapped_batch, 
                         "year": mapped_year,
-                        "status": row.get('enrollment_status', 'active')
+                        "status": 'active' if pd.isna(row.get('enrollment_status')) else _safe_str(row.get('enrollment_status'), 'active')
                     })
 
                 # 5. Process Custom Fields
@@ -1047,7 +1134,7 @@ def _import_students_with_validation(
                 success_count += 1
 
             except Exception as e:
-                errors.append({'row': row_num, 'email': str(row.get('email', '')).strip().lower(), 'error': str(e)})
+                errors.append({'row': row_num, 'email': _safe_str(row.get('email'), '').lower(), 'error': str(e)})
 
         if dry_run:
             trans.rollback()
@@ -1576,12 +1663,14 @@ def _add_student_mover_section(engine: Engine):
         st.markdown("**2. Select Students**")
         df_students = st.session_state.students_to_move_df
         
-        # Add cooldown column
+        # Add cooldown column with proper NaT handling
         df_students['On Cooldown'] = False
         if 'Last Moved On' in df_students.columns:
             thirty_days_ago = datetime.now() - timedelta(days=30)
             last_moved_dt = pd.to_datetime(df_students['Last Moved On'], errors='coerce')
-            df_students['On Cooldown'] = (last_moved_dt > thirty_days_ago)
+            # Only compare for rows with valid (non-NaT) dates
+            valid_dates = last_moved_dt.notna()
+            df_students.loc[valid_dates, 'On Cooldown'] = last_moved_dt[valid_dates] > thirty_days_ago
         
         edited_df = st.data_editor(
             df_students, 
