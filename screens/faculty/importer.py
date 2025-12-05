@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import List, Tuple, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 import pandas as pd
+import numpy as np
 import streamlit as st
 from sqlalchemy import text as sa_text
 from sqlalchemy.engine import Engine, Connection
@@ -25,6 +26,85 @@ from screens.faculty.db import (
 
 # Setup logger
 log = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# NEW: Safe Value Extraction Helpers (NaN/None/Empty handling)
+# ------------------------------------------------------------------
+
+def _is_empty_value(val) -> bool:
+    """
+    Check if a value should be considered empty/missing.
+    Handles pandas NaN, numpy NaN, None, empty strings, and 'nan' strings.
+    """
+    if val is None:
+        return True
+    if isinstance(val, float) and (pd.isna(val) or np.isnan(val)):
+        return True
+    if pd.isna(val):
+        return True
+    if isinstance(val, str) and val.strip().lower() in ('', 'nan', 'none', 'null'):
+        return True
+    return False
+
+
+def _safe_str_get(row: pd.Series, key: str, default: str = '') -> str:
+    """
+    Safely get a string value from a pandas row.
+    Returns the default if the value is NaN, None, empty, or 'nan'.
+    """
+    val = row.get(key)
+    if _is_empty_value(val):
+        return default
+    return str(val).strip()
+
+
+def _safe_int_get(row: pd.Series, key: str, default: int = 0) -> int:
+    """
+    Safely get an integer value from a pandas row.
+    Returns the default if the value is NaN, None, empty, or cannot be converted.
+    """
+    val = row.get(key)
+    if _is_empty_value(val):
+        return default
+    try:
+        # Handle string representations
+        if isinstance(val, str):
+            val = val.strip()
+            if val.lower() in ('true', 'yes', '1'):
+                return 1
+            if val.lower() in ('false', 'no', '0'):
+                return 0
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float_get(row: pd.Series, key: str, default: float = 0.0) -> float:
+    """
+    Safely get a float value from a pandas row.
+    Returns the default if the value is NaN, None, empty, or cannot be converted.
+    """
+    val = row.get(key)
+    if _is_empty_value(val):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_optional_str(row: pd.Series, key: str) -> Optional[str]:
+    """
+    Safely get an optional string value from a pandas row.
+    Returns None if the value is empty/NaN, otherwise returns the stripped string.
+    """
+    val = row.get(key)
+    if _is_empty_value(val):
+        return None
+    result = str(val).strip()
+    return result if result else None
+
 
 # ------------------------------------------------------------------
 # NEW: Helpers for Stateful Combined Import
@@ -282,7 +362,8 @@ def _pa_schema_info(conn) -> dict:
 
 def _csv_get_email(row: pd.Series) -> str:
     """Accept both assignee_email and faculty_email in positions CSVs."""
-    return (row.get("assignee_email") or row.get("faculty_email") or "").strip().lower()
+    email = _safe_str_get(row, "assignee_email") or _safe_str_get(row, "faculty_email")
+    return email.lower() if email else ""
 
 # ---------- NEW: Ensure username + initial credentials for a faculty email ----------
 
@@ -381,19 +462,22 @@ def _import_profiles_with_validation(engine: Engine, df: pd.DataFrame, dry_run: 
 
         for idx, row in df.iterrows():
             try:
-                if not row.get('name') or not row.get('email'):
-                    errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': "Missing required fields: name and email"})
+                name = _safe_str_get(row, 'name')
+                email = _safe_str_get(row, 'email')
+                
+                if not name or not email:
+                    errors.append({'row': idx + 2, 'email': email or 'unknown', 'error': "Missing required fields: name and email"})
                     continue
 
                 # Skip academic admins
-                if _is_academic_admin(conn, row['email']):
-                    skipped_admins.append(row['email'])
+                if _is_academic_admin(conn, email):
+                    skipped_admins.append(email)
                     continue
 
-                # Upsert profile
+                # Upsert profile - use _safe_str_get for status with default 'active'
                 conn.execute(sa_text("""
                     INSERT INTO faculty_profiles(name, email, phone, employee_id, status, first_login_pending, password_export_available)
-                    VALUES(:n, :e, :p, :emp, :s, COALESCE(:flp,1), 1)
+                    VALUES(:n, :e, :p, :emp, :s, :flp, 1)
                     ON CONFLICT(email) DO UPDATE SET
                       name=excluded.name,
                       phone=excluded.phone,
@@ -403,28 +487,29 @@ def _import_profiles_with_validation(engine: Engine, df: pd.DataFrame, dry_run: 
                       password_export_available=1,
                       updated_at=CURRENT_TIMESTAMP
                 """), {
-                    "n": row['name'],
-                    "e": row['email'].lower(),
-                    "p": row.get('phone'),
-                    "emp": row.get('employee_id'),
-                    "s": row.get('status', 'active'),
-                    "flp": _safe_int_convert(row.get('first_login_pending'), 1)
+                    "n": name,
+                    "e": email.lower(),
+                    "p": _safe_optional_str(row, 'phone'),
+                    "emp": _safe_optional_str(row, 'employee_id'),
+                    "s": _safe_str_get(row, 'status', 'active'),
+                    "flp": _safe_int_get(row, 'first_login_pending', 1)
                 })
 
                 # Custom fields
                 for col in custom_columns:
-                    if col in row and pd.notna(row[col]) and row[col] != '':
+                    val = row.get(col)
+                    if not _is_empty_value(val):
                         field_name = col[7:] if col.startswith('custom_') else field_mapping.get(col.lower())
                         if field_name and field_name in active_fields:
-                            _save_custom_field_value(conn, row['email'].lower(), field_name, str(row[col]))
+                            _save_custom_field_value(conn, email.lower(), field_name, str(val))
 
                 # NEW: Ensure username + initial credentials exist
-                _ensure_username_and_initial_creds(conn, row['email'], row['name'])
+                _ensure_username_and_initial_creds(conn, email, name)
 
                 success_count += 1
 
             except Exception as e:
-                errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': str(e)})
+                errors.append({'row': idx + 2, 'email': _safe_str_get(row, 'email', 'unknown'), 'error': str(e)})
 
         if dry_run:
             trans.rollback()
@@ -473,36 +558,35 @@ def _import_affiliations_with_validation(engine: Engine, df: pd.DataFrame, degre
     try:
         for idx, row in df.iterrows():
             try:
-                if not row.get('email') or not row.get('designation'):
-                    errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': "Missing required fields: email and designation"})
+                email = _safe_str_get(row, 'email')
+                designation = _safe_str_get(row, 'designation')
+                
+                if not email or not designation:
+                    errors.append({'row': idx + 2, 'email': email or 'unknown', 'error': "Missing required fields: email and designation"})
                     continue
 
-                affiliation_type = row.get('type', 'core').lower()
+                affiliation_type = _safe_str_get(row, 'type', 'core').lower()
                 if affiliation_type not in ['core', 'visiting']:
-                    errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Invalid type '{row.get('type')}'. Must be 'core' or 'visiting'."})
+                    errors.append({'row': idx + 2, 'email': email, 'error': f"Invalid type '{affiliation_type}'. Must be 'core' or 'visiting'."})
                     continue
 
                 # Skip academic admins
-                if _is_academic_admin(conn, row['email']):
-                    skipped_admins.append(row['email'])
+                if _is_academic_admin(conn, email):
+                    skipped_admins.append(email)
                     continue
 
                 # ensure designation is enabled for this degree
                 with engine.begin() as chk:
-                    if not _designation_enabled(chk, degree, row['designation']):
-                        errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Designation '{row['designation']}' not enabled for degree {degree}"})
+                    if not _designation_enabled(chk, degree, designation):
+                        errors.append({'row': idx + 2, 'email': email, 'error': f"Designation '{designation}' not enabled for degree {degree}"})
                         continue
 
-                prog = row.get('program_code')
-                br = row.get('branch_code')
-                grp = row.get('group_code')
-
-                prog = None if pd.isna(prog) or not str(prog).strip() else prog
-                br   = None if pd.isna(br)   or not str(br).strip()   else br
-                grp  = None if pd.isna(grp)  or not str(grp).strip()  else grp
+                prog = _safe_optional_str(row, 'program_code')
+                br = _safe_optional_str(row, 'branch_code')
+                grp = _safe_optional_str(row, 'group_code')
 
                 if br and not prog:
-                    errors.append({'row': idx + 2, 'email': row['email'], 'error': "program_code is required when branch_code is specified"})
+                    errors.append({'row': idx + 2, 'email': email, 'error': "program_code is required when branch_code is specified"})
                     continue
 
                 existing = conn.execute(sa_text("""
@@ -511,7 +595,7 @@ def _import_affiliations_with_validation(engine: Engine, df: pd.DataFrame, degre
                       AND COALESCE(program_code, '') = COALESCE(:p, '')
                       AND COALESCE(branch_code,  '') = COALESCE(:b, '')
                       AND COALESCE(group_code,   '') = COALESCE(:g, '')
-                """), {"e": row['email'].lower(), "d": degree, "p": prog, "b": br, "g": grp}).fetchone()
+                """), {"e": email.lower(), "d": degree, "p": prog, "b": br, "g": grp}).fetchone()
 
                 if existing:
                     conn.execute(sa_text("""
@@ -526,15 +610,15 @@ def _import_affiliations_with_validation(engine: Engine, df: pd.DataFrame, degre
                            AND COALESCE(branch_code,  '') = COALESCE(:b, '')
                            AND COALESCE(group_code,   '') = COALESCE(:g, '')
                     """), {
-                        "e": row['email'].lower(),
+                        "e": email.lower(),
                         "d": degree,
                         "p": prog,
                         "b": br,
                         "g": grp,
-                        "des": row['designation'],
+                        "des": designation,
                         "t": affiliation_type,
-                        "o": _safe_int_convert(row.get('allowed_credit_override'), 0),
-                        "a": _safe_int_convert(row.get('active'), 1)
+                        "o": _safe_int_get(row, 'allowed_credit_override', 0),
+                        "a": _safe_int_get(row, 'active', 1)
                     })
                 else:
                     conn.execute(sa_text("""
@@ -543,21 +627,21 @@ def _import_affiliations_with_validation(engine: Engine, df: pd.DataFrame, degre
                            designation, type, allowed_credit_override, active)
                         VALUES(:e, :d, :p, :b, :g, :des, :t, :o, :a)
                     """), {
-                        "e": row['email'].lower(),
+                        "e": email.lower(),
                         "d": degree,
                         "p": prog,
                         "b": br,
                         "g": grp,
-                        "des": row['designation'],
+                        "des": designation,
                         "t": affiliation_type,
-                        "o": _safe_int_convert(row.get('allowed_credit_override'), 0),
-                        "a": _safe_int_convert(row.get('active'), 1)
+                        "o": _safe_int_get(row, 'allowed_credit_override', 0),
+                        "a": _safe_int_get(row, 'active', 1)
                     })
 
                 success_count += 1
 
             except Exception as e:
-                errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': str(e)})
+                errors.append({'row': idx + 2, 'email': _safe_str_get(row, 'email', 'unknown'), 'error': str(e)})
 
         if dry_run:
             trans.rollback()
@@ -661,7 +745,8 @@ def _import_positions_with_validation(engine: Engine, df: pd.DataFrame, dry_run:
         for i, row in df.iterrows():
             try:
                 email = _csv_get_email(row)
-                pcode = (row.get("position_code") or "").strip()
+                pcode = _safe_str_get(row, "position_code")
+                
                 if not email or not pcode:
                     errors.append({"row": i + 2, "email": email or "unknown", "error": "assignee_email (or faculty_email) and position_code are required"})
                     continue
@@ -669,22 +754,22 @@ def _import_positions_with_validation(engine: Engine, df: pd.DataFrame, dry_run:
                     errors.append({"row": i + 2, "email": email, "error": f"Unknown or inactive position_code '{pcode}'"})
                     continue
 
-                deg  = (row.get("degree_code")  or "").strip() or None
-                prog = (row.get("program_code") or "").strip() or None
-                br   = (row.get("branch_code")  or "").strip() or None
-                grp  = (row.get("group_code")   or "").strip() or None
+                deg = _safe_optional_str(row, "degree_code")
+                prog = _safe_optional_str(row, "program_code")
+                br = _safe_optional_str(row, "branch_code")
+                grp = _safe_optional_str(row, "group_code")
 
                 if br and not prog:
                     errors.append({"row": i + 2, "email": email, "error": "program_code is required when branch_code is specified"})
                     continue
 
-                start_date = (row.get("start_date") or "").strip() or None
-                end_date   = (row.get("end_date")   or "").strip() or None
-                credit_relief = _safe_int_convert(row.get("credit_relief"), 0)
-                notes = (row.get("notes") or "").strip() or None
+                start_date = _safe_optional_str(row, "start_date")
+                end_date = _safe_optional_str(row, "end_date")
+                credit_relief = _safe_int_get(row, "credit_relief", 0)
+                notes = _safe_optional_str(row, "notes")
 
-                csv_active_val = row.get("is_active", row.get("active", 1))
-                is_active_val = _safe_int_convert(csv_active_val, 1)
+                # Handle both is_active and active columns
+                is_active_val = _safe_int_get(row, "is_active", _safe_int_get(row, "active", 1))
 
                 # Upsert by email + scope + start_date
                 if info["has_assignee_email"]:
@@ -858,59 +943,69 @@ def _import_combined_with_validation(
 
         for idx, row in df.iterrows():
             try:
-                if not row.get('name') or not row.get('email'):
-                    errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': "Missing required fields: name and email"})
+                name = _safe_str_get(row, 'name')
+                email = _safe_str_get(row, 'email')
+                
+                if not name or not email:
+                    errors.append({'row': idx + 2, 'email': email or 'unknown', 'error': "Missing required fields: name and email"})
                     continue
 
-                if _is_academic_admin(conn, row['email']):
-                    skipped_admins.append(row['email'])
+                if _is_academic_admin(conn, email):
+                    skipped_admins.append(email)
                     continue
 
-                degree_code = row.get('degree_code')
+                degree_code = _safe_optional_str(row, 'degree_code')
 
                 if degree_code:
                     if degree_code not in all_degrees:
-                        errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Degree '{degree_code}' not found."})
+                        errors.append({'row': idx + 2, 'email': email, 'error': f"Degree '{degree_code}' not found."})
                         continue
 
-                    if row.get('designation'):
-                        if not _designation_enabled(conn, degree_code, row['designation']):
-                            errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Designation '{row['designation']}' not enabled for degree {degree_code}"})
+                    designation = _safe_str_get(row, 'designation')
+                    if designation:
+                        if not _designation_enabled(conn, degree_code, designation):
+                            errors.append({'row': idx + 2, 'email': email, 'error': f"Designation '{designation}' not enabled for degree {degree_code}"})
                             continue
 
-                # (Profile Upsert logic is unchanged)
+                # Profile Upsert - using safe getters with proper defaults
                 conn.execute(sa_text("""
                     INSERT INTO faculty_profiles(name, email, phone, employee_id, status, first_login_pending, password_export_available)
-                    VALUES(:n, :e, :p, :emp, :s, COALESCE(:flp,1), 1)
+                    VALUES(:n, :e, :p, :emp, :s, :flp, 1)
                     ON CONFLICT(email) DO UPDATE SET
                       name=excluded.name, phone=excluded.phone, employee_id=excluded.employee_id, status=excluded.status,
                       first_login_pending=COALESCE(excluded.first_login_pending, faculty_profiles.first_login_pending),
                       password_export_available=1, updated_at=CURRENT_TIMESTAMP
                 """), {
-                    "n": row['name'], "e": row['email'].lower(), "p": row.get('phone'), "emp": row.get('employee_id'),
-                    "s": row.get('status', 'active'), "flp": _safe_int_convert(row.get('first_login_pending'), 1)
+                    "n": name, 
+                    "e": email.lower(), 
+                    "p": _safe_optional_str(row, 'phone'), 
+                    "emp": _safe_optional_str(row, 'employee_id'),
+                    "s": _safe_str_get(row, 'status', 'active'),  # DEFAULT TO 'active' IF EMPTY/NAN
+                    "flp": _safe_int_get(row, 'first_login_pending', 1)
                 })
 
-                # (Custom fields logic is unchanged)
+                # Custom fields
                 for col in custom_columns:
-                    if col in row and pd.notna(row[col]) and row[col] != '':
+                    val = row.get(col)
+                    if not _is_empty_value(val):
                         field_name = col[7:] if col.startswith('custom_') else field_mapping.get(col.lower())
                         if field_name and field_name in active_fields:
-                            _save_custom_field_value(conn, row['email'].lower(), field_name, str(row[col]))
+                            _save_custom_field_value(conn, email.lower(), field_name, str(val))
 
-                # (Credentials logic is unchanged)
-                _ensure_username_and_initial_creds(conn, row['email'], row['name'])
+                # Credentials
+                _ensure_username_and_initial_creds(conn, email, name)
 
                 # Process affiliation if degree and designation provided
-                if degree_code and row.get('designation'):
-                    affiliation_type = row.get('type', 'core').lower()
+                designation = _safe_str_get(row, 'designation')
+                if degree_code and designation:
+                    affiliation_type = _safe_str_get(row, 'type', 'core').lower()
                     if affiliation_type not in ['core', 'visiting']:
-                        errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Invalid type '{row.get('type')}'. Must be 'core' or 'visiting'."})
+                        errors.append({'row': idx + 2, 'email': email, 'error': f"Invalid type '{affiliation_type}'. Must be 'core' or 'visiting'."})
                         continue
 
-                    group_code = str(row.get('group_code', '')).strip()
-                    program_code = str(row.get('program_code', '')).strip()
-                    branch_code = str(row.get('branch_code', '')).strip()
+                    group_code = _safe_str_get(row, 'group_code')
+                    program_code = _safe_str_get(row, 'program_code')
+                    branch_code = _safe_str_get(row, 'branch_code')
 
                     if translation_map:
                         mapped_group = translation_map.get('cg', {}).get(group_code, group_code)
@@ -922,7 +1017,7 @@ def _import_combined_with_validation(
                             log.debug(f"Row {idx + 2}: Ignoring affiliation due to user mapping.")
                             skipped_rows.append({
                                 "row": idx + 2, 
-                                "email": row.get('email', 'unknown'), 
+                                "email": email, 
                                 "reason": "Ignored by user mapping rule."
                             })
                             continue # Skip the rest of the affiliation logic
@@ -937,18 +1032,18 @@ def _import_combined_with_validation(
                         grp = group_code if group_code else None
 
                     if br and not prog:
-                        errors.append({'row': idx + 2, 'email': row['email'], 'error': "program_code is required when branch_code is specified"})
+                        errors.append({'row': idx + 2, 'email': email, 'error': "program_code is required when branch_code is specified"})
                         continue
 
                     try:
-                        # (Affiliation upsert logic is unchanged)
+                        # Affiliation upsert
                         existing = conn.execute(sa_text("""
                             SELECT 1 FROM faculty_affiliations
                             WHERE email = :e AND degree_code = :d
                               AND COALESCE(program_code, '') = COALESCE(:p, '')
                               AND COALESCE(branch_code,  '') = COALESCE(:b, '')
                               AND COALESCE(group_code,   '') = COALESCE(:g, '')
-                        """), {"e": row['email'].lower(), "d": degree_code, "p": prog, "b": br, "g": grp}).fetchone()
+                        """), {"e": email.lower(), "d": degree_code, "p": prog, "b": br, "g": grp}).fetchone()
 
                         if existing:
                             conn.execute(sa_text("""
@@ -959,8 +1054,10 @@ def _import_combined_with_validation(
                                    AND COALESCE(branch_code,  '') = COALESCE(:b, '')
                                    AND COALESCE(group_code,   '') = COALESCE(:g, '')
                             """), {
-                                "e": row['email'].lower(), "d": degree_code, "p": prog, "b": br, "g": grp, "des": row['designation'],
-                                "t": affiliation_type, "o": _safe_int_convert(row.get('allowed_credit_override'), 0), "a": _safe_int_convert(row.get('active'), 1)
+                                "e": email.lower(), "d": degree_code, "p": prog, "b": br, "g": grp, "des": designation,
+                                "t": affiliation_type, 
+                                "o": _safe_int_get(row, 'allowed_credit_override', 0), 
+                                "a": _safe_int_get(row, 'active', 1)
                             })
                         else:
                             conn.execute(sa_text("""
@@ -969,17 +1066,19 @@ def _import_combined_with_validation(
                                    designation, type, allowed_credit_override, active)
                                 VALUES(:e, :d, :p, :b, :g, :des, :t, :o, :a)
                             """), {
-                                "e": row['email'].lower(), "d": degree_code, "p": prog, "b": br, "g": grp, "des": row['designation'],
-                                "t": affiliation_type, "o": _safe_int_convert(row.get('allowed_credit_override'), 0), "a": _safe_int_convert(row.get('active'), 1)
+                                "e": email.lower(), "d": degree_code, "p": prog, "b": br, "g": grp, "des": designation,
+                                "t": affiliation_type, 
+                                "o": _safe_int_get(row, 'allowed_credit_override', 0), 
+                                "a": _safe_int_get(row, 'active', 1)
                             })
                     except Exception as aff_error:
-                        errors.append({'row': idx + 2, 'email': row['email'], 'error': f"Affiliation error: {str(aff_error)}"})
+                        errors.append({'row': idx + 2, 'email': email, 'error': f"Affiliation error: {str(aff_error)}"})
                         continue
 
                 success_count += 1
 
             except Exception as e:
-                errors.append({'row': idx + 2, 'email': row.get('email', 'unknown'), 'error': str(e)})
+                errors.append({'row': idx + 2, 'email': _safe_str_get(row, 'email', 'unknown'), 'error': str(e)})
 
         if dry_run:
             trans.rollback()
@@ -1041,6 +1140,77 @@ def _prepare_affiliations_export_data(_engine: Engine, degree: str) -> pd.DataFr
 @st.cache_data
 def _prepare_combined_export_data(_engine: Engine) -> pd.DataFrame:
     """Helper to generate the DataFrame for combined export."""
+    with _engine.begin() as conn:
+        profile_rows = conn.execute(sa_text("""
+            SELECT name, email, phone, employee_id, status, first_login_pending
+            FROM faculty_profiles ORDER BY name
+        """)).fetchall()
+
+        custom_fields = _get_custom_profile_fields(conn)
+        active_fields = [f for f in custom_fields if f['is_active']]
+        custom_data_map = _get_all_custom_field_data(conn)
+
+        affiliation_rows = conn.execute(sa_text("""
+            SELECT email, degree_code, program_code, branch_code, group_code,
+                   designation, type, allowed_credit_override, active
+            FROM faculty_affiliations ORDER BY email, degree_code
+        """)).fetchall()
+
+        profiles_dict: Dict[str, Dict[str, Any]] = {}
+        for row in profile_rows:
+            email = row[1].lower()
+            profiles_dict[email] = {
+                "name": row[0],
+                "email": row[1],
+                "phone": row[2],
+                "employee_id": row[3],
+                "status": row[4],
+                "first_login_pending": row[5]
+            }
+            user_custom_data = custom_data_map.get(email, {})
+            for field in active_fields:
+                profiles_dict[email][field['display_name']] = user_custom_data.get(field['field_name'], '')
+
+        affiliation_map: Dict[str, List[Any]] = defaultdict(list)
+        for aff_row in affiliation_rows:
+            affiliation_map[aff_row[0].lower()].append(aff_row)
+
+        combined_data: List[Dict[str, Any]] = []
+
+        for email, profile_data in profiles_dict.items():
+            if email in affiliation_map:
+                for aff_row in affiliation_map[email]:
+                    combined_row = profile_data.copy()
+                    combined_row.update({
+                        "degree_code": aff_row[1],
+                        "program_code": aff_row[2] or "",
+                        "branch_code": aff_row[3] or "",
+                        "group_code": aff_row[4] or "",
+                        "designation": aff_row[5],
+                        "type": aff_row[6],
+                        "allowed_credit_override": aff_row[7],
+                        "active": aff_row[8]
+                    })
+                    combined_data.append(combined_row)
+            else:
+                combined_data.append(profile_data.copy())
+
+        columns = [
+            "name", "email", "phone", "employee_id", "status", "first_login_pending",
+            "degree_code", "program_code", "branch_code", "group_code",
+            "designation", "type", "allowed_credit_override", "active"
+        ]
+        for field in active_fields:
+            columns.append(field['display_name'])
+
+    return pd.DataFrame(combined_data, columns=columns)
+
+
+# ----------------------------- Detailed Combined Export with Custom Fields -----------------------------
+
+@st.cache_data
+def _prepare_combined_export_data_with_custom_fields(_engine: Engine) -> pd.DataFrame:
+    """Helper to generate the DataFrame for combined export including custom fields in both formats."""
     with _engine.begin() as conn:
         profile_rows = conn.execute(sa_text("""
             SELECT name, email, phone, employee_id, status, first_login_pending
